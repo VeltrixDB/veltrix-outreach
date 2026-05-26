@@ -9,9 +9,36 @@ import (
 	"time"
 )
 
-// postSlack posts the full weekly digest: leads + intent signals.
+// postSlack sends the weekly digest as two separate Slack messages to stay
+// under Slack's 50-block-per-message hard limit.
+// Message 1: intent signals (real-time buyer signals).
+// Message 2: outreach leads in pages of 20 (GitHub contributors).
 func postSlack(webhookURL string, leads []Lead, signals []IntentSignal) error {
-	payload := buildSlackPayload(leads, signals)
+	week := time.Now().Format("Jan 2, 2006")
+
+	if len(signals) > 0 {
+		if err := sendMessage(webhookURL, signalsPayload(signals, week)); err != nil {
+			return fmt.Errorf("signals message: %w", err)
+		}
+	}
+
+	// Send leads in pages of 20 to stay well under 50 blocks per message.
+	const pageSize = 20
+	for i := 0; i < len(leads); i += pageSize {
+		end := i + pageSize
+		if end > len(leads) {
+			end = len(leads)
+		}
+		page := i/pageSize + 1
+		total := (len(leads) + pageSize - 1) / pageSize
+		if err := sendMessage(webhookURL, leadsPayload(leads[i:end], week, page, total)); err != nil {
+			return fmt.Errorf("leads message page %d: %w", page, err)
+		}
+	}
+	return nil
+}
+
+func sendMessage(webhookURL string, payload map[string]any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -27,75 +54,68 @@ func postSlack(webhookURL string, leads []Lead, signals []IntentSignal) error {
 	return nil
 }
 
-func buildSlackPayload(leads []Lead, signals []IntentSignal) map[string]any {
-	week := time.Now().Format("Jan 2, 2006")
-
+// signalsPayload builds the intent signals message (max ~18 blocks for 15 signals).
+func signalsPayload(signals []IntentSignal, week string) map[string]any {
 	blocks := []map[string]any{
 		{
 			"type": "header",
 			"text": map[string]any{
 				"type": "plain_text",
-				"text": "🎯  VeltrixDB Outreach — Week of " + week,
+				"text": "📢  Intent Signals — Week of " + week,
 			},
 		},
 		{
 			"type": "context",
-			"elements": []map[string]any{
-				{
-					"type": "mrkdwn",
-					"text": fmt.Sprintf(
-						"*%d outreach leads* from GitHub  ·  *%d intent signals* from LinkedIn, Reddit & HN",
-						len(leads), len(signals),
-					),
-				},
-			},
+			"elements": []map[string]any{{
+				"type": "mrkdwn",
+				"text": fmt.Sprintf("*%d people* actively expressing KV database pain on LinkedIn, Reddit & HN — highest-priority leads.", len(signals)),
+			}},
 		},
+		{"type": "divider"},
 	}
-
-	// ── Section 1: Intent signals ─────────────────────────────────────────────
-	if len(signals) > 0 {
-		blocks = append(blocks,
-			map[string]any{"type": "divider"},
-			map[string]any{
-				"type": "section",
-				"text": map[string]any{
-					"type": "mrkdwn",
-					"text": "*📢  Active Intent Signals — reach out now*\nPeople currently expressing the exact pain VeltrixDB solves.",
-				},
-			},
-		)
-		for _, s := range signals {
-			blocks = append(blocks, signalBlock(s), map[string]any{"type": "divider"})
-		}
+	for _, s := range signals {
+		blocks = append(blocks, signalBlock(s))
 	}
-
-	// ── Section 2: Outreach leads (GitHub contributors) ───────────────────────
-	if len(leads) > 0 {
-		blocks = append(blocks,
-			map[string]any{
-				"type": "section",
-				"text": map[string]any{
-					"type": "mrkdwn",
-					"text": "*🎯  Outreach Leads — contributors to competing databases*\nTop 25 new leads, 60-day cooldown.",
-				},
-			},
-		)
-		for _, l := range leads {
-			blocks = append(blocks, leadBlock(l), map[string]any{"type": "divider"})
-		}
-	}
-
-	// Footer
 	blocks = append(blocks, map[string]any{
 		"type": "context",
-		"elements": []map[string]any{
-			{
-				"type": "mrkdwn",
-				"text": "Sources: Redis · RocksDB · BadgerDB · etcd · TiKV · Dragonfly · LevelDB · ScyllaDB · Aerospike · TiDB · CockroachDB · LinkedIn (Bing) · Reddit · HN  |  <https://github.com/VeltrixDB/veltrix-outreach|veltrix-outreach>",
-			},
-		},
+		"elements": []map[string]any{{
+			"type": "mrkdwn",
+			"text": "Sources: LinkedIn (Bing) · Reddit · Hacker News  |  <https://github.com/VeltrixDB/veltrix-outreach|veltrix-outreach>",
+		}},
 	})
+	return map[string]any{"blocks": blocks}
+}
 
+// leadsPayload builds one page of outreach leads (max ~23 blocks for 20 leads).
+func leadsPayload(leads []Lead, week string, page, totalPages int) map[string]any {
+	title := "🎯  Outreach Leads — Week of " + week
+	if totalPages > 1 {
+		title = fmt.Sprintf("🎯  Outreach Leads — Week of %s (%d/%d)", week, page, totalPages)
+	}
+	blocks := []map[string]any{
+		{
+			"type": "header",
+			"text": map[string]any{"type": "plain_text", "text": title},
+		},
+		{
+			"type": "context",
+			"elements": []map[string]any{{
+				"type": "mrkdwn",
+				"text": fmt.Sprintf("*%d new leads* from GitHub contributors to competing KV databases  ·  60-day cooldown", len(leads)),
+			}},
+		},
+		{"type": "divider"},
+	}
+	for _, l := range leads {
+		blocks = append(blocks, leadBlock(l))
+	}
+	blocks = append(blocks, map[string]any{
+		"type": "context",
+		"elements": []map[string]any{{
+			"type": "mrkdwn",
+			"text": "Sources: Redis · RocksDB · BadgerDB · etcd · TiKV · FoundationDB · Dragonfly · LevelDB · ScyllaDB · Aerospike · TiDB · CockroachDB",
+		}},
+	})
 	return map[string]any{"blocks": blocks}
 }
 
@@ -109,7 +129,7 @@ func signalBlock(s IntentSignal) map[string]any {
 
 	// Author line
 	if s.AuthorURL != "" {
-		sb.WriteString(fmt.Sprintf("<  %s|%s>", s.AuthorURL, slackEscape(s.AuthorName)))
+		sb.WriteString(fmt.Sprintf("<%s|%s>", s.AuthorURL, slackEscape(s.AuthorName)))
 	} else {
 		sb.WriteString(slackEscape(s.AuthorName))
 	}
